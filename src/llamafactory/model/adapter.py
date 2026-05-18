@@ -311,12 +311,12 @@ def init_adapter(
             raise ValueError("Cannot initialize PiSSA adapter on quantized models.")
 
     # cast trainable parameters to float32 if:
-    # 1. is_trainable and not pure_bf16 and not badam and quantization_bit is not None (qlora)
-    # 2. is_trainable and not pure_bf16 and not badam and not zero3 (zero3 already in fp32)
+    # 1. is_trainable and not pure_bf16 and quantization_bit is not None (qlora)
+    # 2. is_trainable and not pure_bf16 and not zero3 (zero3 already in fp32)
     cast_trainable_params_to_fp32 = False
     if not is_trainable:
         pass
-    elif finetuning_args.pure_bf16 or finetuning_args.use_badam:
+    elif finetuning_args.pure_bf16:
         logger.info_rank0("Pure bf16 / BAdam detected, remaining trainable params in half precision.")
     elif model_args.quantization_bit is None and is_deepspeed_zero3_enabled():
         logger.info_rank0("DeepSpeed ZeRO3 detected, remaining trainable params in float32.")

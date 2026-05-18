@@ -107,14 +107,10 @@ TRAINING_ARGS = "training_args.yaml"
 
 TRAINING_STAGES = {
     "Supervised Fine-Tuning": "sft",
-    "Reward Modeling": "rm",
-    "PPO": "ppo",
     "DPO": "dpo",
-    "KTO": "kto",
-    "Pre-Training": "pt",
 }
 
-STAGES_USE_PAIR_DATA = {"rm", "dpo"}
+STAGES_USE_PAIR_DATA = {"dpo"}
 
 SUPPORTED_CLASS_FOR_S2ATTN = {"llama"}
 

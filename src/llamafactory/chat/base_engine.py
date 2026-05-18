@@ -20,11 +20,9 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel, PreTrainedTokenizer
-    from vllm import AsyncLLMEngine
 
     from ..data import Template
     from ..data.mm_plugin import AudioInput, ImageInput, VideoInput
-    from ..extras.constants import EngineName
     from ..hparams import DataArguments, FinetuningArguments, GeneratingArguments, ModelArguments
 
 

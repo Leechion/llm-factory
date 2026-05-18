@@ -31,7 +31,7 @@ from typing_extensions import override
 
 from ..extras import logging
 from ..extras.constants import TRAINER_LOG, V_HEAD_SAFE_WEIGHTS_NAME, V_HEAD_WEIGHTS_NAME
-from ..extras.misc import get_peak_memory, is_env_enabled, use_ray
+from ..extras.misc import get_peak_memory, is_env_enabled
 from ..extras.packages import is_safetensors_available
 
 
@@ -185,7 +185,7 @@ class LogCallback(TrainerCallback):
         self.do_train = False
         # Web UI
         self.webui_mode = is_env_enabled("LLAMABOARD_ENABLED")
-        if self.webui_mode and not use_ray():
+        if self.webui_mode:
             signal.signal(signal.SIGABRT, self._set_abort)
             self.logger_handler = logging.LoggerHandler(os.getenv("LLAMABOARD_WORKDIR"))
             logging.add_handler(self.logger_handler)
@@ -375,18 +375,6 @@ class ReporterCallback(TrainerCallback):
             import trackio
 
             trackio.config.update(
-                {
-                    "model_args": self.model_args.to_dict(),
-                    "data_args": self.data_args.to_dict(),
-                    "finetuning_args": self.finetuning_args.to_dict(),
-                    "generating_args": self.generating_args.to_dict(),
-                }
-            )
-
-        if self.finetuning_args.use_swanlab:
-            import swanlab  # type: ignore
-
-            swanlab.config.update(
                 {
                     "model_args": self.model_args.to_dict(),
                     "data_args": self.data_args.to_dict(),

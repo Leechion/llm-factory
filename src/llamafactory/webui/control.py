@@ -81,7 +81,7 @@ def change_stage(training_stage: str = list(TRAINING_STAGES.keys())[0]) -> tuple
     Inputs: train.training_stage
     Outputs: train.dataset, train.packing
     """
-    return [], TRAINING_STAGES[training_stage] == "pt"
+    return [], False
 
 
 def get_model_info(model_name: str) -> tuple[str, str]:

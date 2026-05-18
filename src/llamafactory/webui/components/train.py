@@ -23,16 +23,13 @@ from ..common import DEFAULT_DATA_DIR
 from ..control import change_stage, list_checkpoints, list_config_paths, list_datasets, list_output_dirs
 from .data import create_preview_box
 
-
 if is_gradio_available():
     import gradio as gr
-
 
 if TYPE_CHECKING:
     from gradio.components import Component
 
     from ..engine import Engine
-
 
 def create_train_tab(engine: "Engine") -> dict[str, "Component"]:
     input_elems = engine.manager.get_base_elems()
@@ -235,22 +232,15 @@ def create_train_tab(engine: "Engine") -> dict[str, "Component"]:
         with gr.Row():
             pref_beta = gr.Slider(minimum=0, maximum=1, value=0.1, step=0.01)
             pref_ftx = gr.Slider(minimum=0, maximum=10, value=0, step=0.01)
-            pref_loss = gr.Dropdown(choices=["sigmoid", "hinge", "ipo", "kto_pair", "orpo", "simpo"], value="sigmoid")
-            reward_model = gr.Dropdown(multiselect=True, allow_custom_value=True)
-            with gr.Column():
-                ppo_score_norm = gr.Checkbox()
-                ppo_whiten_rewards = gr.Checkbox()
+            pref_loss = gr.Dropdown(choices=["sigmoid", "hinge", "ipo", "orpo", "simpo"], value="sigmoid")
 
-    input_elems.update({pref_beta, pref_ftx, pref_loss, reward_model, ppo_score_norm, ppo_whiten_rewards})
+    input_elems.update({pref_beta, pref_ftx, pref_loss})
     elem_dict.update(
         dict(
             rlhf_tab=rlhf_tab,
             pref_beta=pref_beta,
             pref_ftx=pref_ftx,
             pref_loss=pref_loss,
-            reward_model=reward_model,
-            ppo_score_norm=ppo_score_norm,
-            ppo_whiten_rewards=ppo_whiten_rewards,
         )
     )
 
@@ -290,87 +280,6 @@ def create_train_tab(engine: "Engine") -> dict[str, "Component"]:
         )
     )
 
-    with gr.Accordion(open=False) as galore_tab:
-        with gr.Row():
-            use_galore = gr.Checkbox()
-            galore_rank = gr.Slider(minimum=1, maximum=1024, value=16, step=1)
-            galore_update_interval = gr.Slider(minimum=1, maximum=2048, value=200, step=1)
-            galore_scale = gr.Slider(minimum=0, maximum=100, value=2.0, step=0.1)
-            galore_target = gr.Textbox(value="all")
-
-    input_elems.update({use_galore, galore_rank, galore_update_interval, galore_scale, galore_target})
-    elem_dict.update(
-        dict(
-            galore_tab=galore_tab,
-            use_galore=use_galore,
-            galore_rank=galore_rank,
-            galore_update_interval=galore_update_interval,
-            galore_scale=galore_scale,
-            galore_target=galore_target,
-        )
-    )
-
-    with gr.Accordion(open=False) as apollo_tab:
-        with gr.Row():
-            use_apollo = gr.Checkbox()
-            apollo_rank = gr.Slider(minimum=1, maximum=1024, value=16, step=1)
-            apollo_update_interval = gr.Slider(minimum=1, maximum=2048, value=200, step=1)
-            apollo_scale = gr.Slider(minimum=0, maximum=100, value=32.0, step=0.1)
-            apollo_target = gr.Textbox(value="all")
-
-    input_elems.update({use_apollo, apollo_rank, apollo_update_interval, apollo_scale, apollo_target})
-    elem_dict.update(
-        dict(
-            apollo_tab=apollo_tab,
-            use_apollo=use_apollo,
-            apollo_rank=apollo_rank,
-            apollo_update_interval=apollo_update_interval,
-            apollo_scale=apollo_scale,
-            apollo_target=apollo_target,
-        )
-    )
-
-    with gr.Accordion(open=False) as badam_tab:
-        with gr.Row():
-            use_badam = gr.Checkbox()
-            badam_mode = gr.Dropdown(choices=["layer", "ratio"], value="layer")
-            badam_switch_mode = gr.Dropdown(choices=["ascending", "descending", "random", "fixed"], value="ascending")
-            badam_switch_interval = gr.Slider(minimum=1, maximum=1024, value=50, step=1)
-            badam_update_ratio = gr.Slider(minimum=0, maximum=1, value=0.05, step=0.01)
-
-    input_elems.update({use_badam, badam_mode, badam_switch_mode, badam_switch_interval, badam_update_ratio})
-    elem_dict.update(
-        dict(
-            badam_tab=badam_tab,
-            use_badam=use_badam,
-            badam_mode=badam_mode,
-            badam_switch_mode=badam_switch_mode,
-            badam_switch_interval=badam_switch_interval,
-            badam_update_ratio=badam_update_ratio,
-        )
-    )
-
-    with gr.Accordion(open=False) as swanlab_tab:
-        with gr.Row():
-            use_swanlab = gr.Checkbox()
-            swanlab_project = gr.Textbox(value="llamafactory")
-            swanlab_run_name = gr.Textbox()
-            swanlab_workspace = gr.Textbox()
-            swanlab_api_key = gr.Textbox()
-            swanlab_mode = gr.Dropdown(choices=["cloud", "local"], value="cloud")
-            swanlab_link = gr.Markdown(visible=False)
-
-    input_elems.update(
-        {
-            use_swanlab,
-            swanlab_project,
-            swanlab_run_name,
-            swanlab_workspace,
-            swanlab_api_key,
-            swanlab_mode,
-            swanlab_link,
-        }
-    )
     elem_dict.update(
         dict(
             swanlab_tab=swanlab_tab,

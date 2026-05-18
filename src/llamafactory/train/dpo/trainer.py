@@ -111,10 +111,8 @@ class CustomDPOTrainer(DPOTrainer):
         if processor is not None:
             self.add_callback(SaveProcessorCallback(processor))
 
-        if finetuning_args.use_badam:
-            from badam import BAdamCallback, clip_grad_norm_old_version  # type: ignore
-
-            self.accelerator.clip_grad_norm_ = MethodType(clip_grad_norm_old_version, self.accelerator)
+        if False:  # badam removed in simplified version
+            pass
             self.add_callback(BAdamCallback)
 
         if self.bco_gemma >= 1e-6:

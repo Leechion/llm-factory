@@ -18,8 +18,8 @@
 # limitations under the License.
 
 import json
-import os
-from collections.abc import Callable, Mapping
+
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
@@ -33,27 +33,9 @@ from transformers.trainer_pt_utils import get_parameter_names
 from typing_extensions import override
 
 from ..extras import logging
-from ..extras.constants import IGNORE_INDEX, SWANLAB_CONFIG
-from ..extras.misc import get_device_name
-from ..extras.packages import is_apollo_available, is_galore_available, is_ray_available
+from ..extras.constants import IGNORE_INDEX
 from ..hparams import FinetuningArguments, ModelArguments
 from ..model import find_all_linear_modules, load_model, load_tokenizer, load_valuehead_params
-
-
-if is_galore_available():
-    from galore_torch import GaLoreAdafactor, GaLoreAdamW, GaLoreAdamW8bit  # type: ignore
-
-
-if is_apollo_available():
-    from apollo_torch import APOLLOAdamW  # type: ignore
-
-
-if is_ray_available():
-    import ray
-    from ray.util.placement_group import PlacementGroup, placement_group
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-    from ray.util.state import list_nodes
-
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel, TrainerCallback, TrainerState
@@ -61,9 +43,7 @@ if TYPE_CHECKING:
 
     from ..hparams import DataArguments, TrainingArguments
 
-
 logger = logging.get_logger(__name__)
-
 
 class DummyOptimizer(torch.optim.Optimizer):
     r"""A dummy optimizer used for the GaLore or APOLLO algorithm."""
@@ -82,7 +62,6 @@ class DummyOptimizer(torch.optim.Optimizer):
     @override
     def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
         pass
-
 
 def create_modelcard_and_push(
     trainer: "Trainer",
@@ -111,7 +90,6 @@ def create_modelcard_and_push(
         trainer.push_to_hub(**kwargs)
     else:
         Trainer.create_model_card(trainer, license="other", **kwargs)  # prevent from connecting to hub
-
 
 def create_ref_model(
     model_args: "ModelArguments", finetuning_args: "FinetuningArguments", add_valuehead: bool = False
@@ -146,7 +124,6 @@ def create_ref_model(
             logger.info_rank0("Created reference model from the model itself.")
 
     return ref_model
-
 
 def create_reward_model(
     model: "AutoModelForCausalLMWithValueHead", model_args: "ModelArguments", finetuning_args: "FinetuningArguments"
@@ -189,7 +166,6 @@ def create_reward_model(
         logger.warning_rank0("Please ensure the ppo model and reward model share SAME tokenizer and vocabulary.")
         return reward_model
 
-
 def _get_decay_parameter_names(model: "PreTrainedModel") -> list[str]:
     r"""Return a list of names of parameters with weight decay. (weights in non-layernorm layers)."""
     decay_parameters = get_parameter_names(model, ALL_LAYERNORM_LAYERS)
@@ -197,356 +173,12 @@ def _get_decay_parameter_names(model: "PreTrainedModel") -> list[str]:
     return decay_parameters
 
 
-def _create_galore_optimizer(
-    model: "PreTrainedModel",
-    training_args: "TrainingArguments",
-    finetuning_args: "FinetuningArguments",
-) -> "torch.optim.Optimizer":
-    if len(finetuning_args.galore_target) == 1 and finetuning_args.galore_target[0] == "all":
-        galore_targets = find_all_linear_modules(model, finetuning_args.freeze_vision_tower)
-    else:
-        galore_targets = finetuning_args.galore_target
-
-    galore_params: list[torch.nn.Parameter] = []
-    for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear) and any(target in name for target in galore_targets):
-            for param in module.parameters():
-                if param.requires_grad and len(param.shape) > 1:
-                    galore_params.append(param)
-
-    galore_kwargs = {
-        "rank": finetuning_args.galore_rank,
-        "update_proj_gap": finetuning_args.galore_update_interval,
-        "scale": finetuning_args.galore_scale,
-        "proj_type": finetuning_args.galore_proj_type,
-    }
-
-    id_galore_params = {id(param) for param in galore_params}
-    decay_params, nodecay_params = [], []  # they are non-galore parameters
-    trainable_params: list[torch.nn.Parameter] = []  # galore_params + decay_params + nodecay_params
-    decay_param_names = _get_decay_parameter_names(model)
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            trainable_params.append(param)
-            if id(param) not in id_galore_params:
-                if name in decay_param_names:
-                    decay_params.append(param)
-                else:
-                    nodecay_params.append(param)
-
-    _, optim_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args)
-
-    if training_args.optim == "adamw_torch":
-        optim_class = GaLoreAdamW
-    elif training_args.optim in ["adamw_bnb_8bit", "adamw_8bit", "paged_adamw_8bit"]:
-        optim_class = GaLoreAdamW8bit
-    elif training_args.optim == "adafactor":
-        optim_class = GaLoreAdafactor
-    else:
-        raise NotImplementedError(f"Unknown optim: {training_args.optim}.")
-
-    if finetuning_args.galore_layerwise:
-        logger.warning_rank0("The displayed gradient norm will be all zeros in layerwise GaLore.")
-        if training_args.gradient_accumulation_steps != 1:
-            raise ValueError("Per-layer GaLore does not support gradient accumulation.")
-
-        optimizer_dict: dict[torch.Tensor, torch.optim.Optimizer] = {}
-        for param in nodecay_params:
-            param_groups = [dict(params=[param], weight_decay=0.0)]
-            optimizer_dict[param] = optim_class(param_groups, **optim_kwargs)
-        for param in decay_params:
-            param_groups = [dict(params=[param], weight_decay=training_args.weight_decay)]
-            optimizer_dict[param] = optim_class(param_groups, **optim_kwargs)
-        for param in galore_params:  # galore params have weight decay
-            param_groups = [dict(params=[param], weight_decay=training_args.weight_decay, **galore_kwargs)]
-            optimizer_dict[param] = optim_class(param_groups, **optim_kwargs)
-
-        def optimizer_hook(param: "torch.nn.Parameter"):
-            if param.grad is not None:
-                optimizer_dict[param].step()
-                optimizer_dict[param].zero_grad()
-
-        for param in trainable_params:
-            param.register_post_accumulate_grad_hook(optimizer_hook)
-
-        optimizer = DummyOptimizer(lr=training_args.learning_rate, optimizer_dict=optimizer_dict)
-    else:
-        param_groups = [
-            dict(params=nodecay_params, weight_decay=0.0),
-            dict(params=decay_params, weight_decay=training_args.weight_decay),
-            dict(params=galore_params, weight_decay=training_args.weight_decay, **galore_kwargs),
-        ]
-        optimizer = optim_class(param_groups, **optim_kwargs)
-
-    logger.info_rank0(
-        f"Using GaLore optimizer with args: {galore_kwargs}. "
-        "It may cause hanging at the start of training, wait patiently."
-    )
-    return optimizer
-
-
-def _create_apollo_optimizer(
-    model: "PreTrainedModel",
-    training_args: "TrainingArguments",
-    finetuning_args: "FinetuningArguments",
-) -> "torch.optim.Optimizer":
-    if len(finetuning_args.apollo_target) == 1 and finetuning_args.apollo_target[0] == "all":
-        apollo_targets = find_all_linear_modules(model, finetuning_args.freeze_vision_tower)
-    else:
-        apollo_targets = finetuning_args.apollo_target
-
-    apollo_params: list[torch.nn.Parameter] = []
-    for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear) and any(target in name for target in apollo_targets):
-            for param in module.parameters():
-                if param.requires_grad and len(param.shape) > 1:
-                    apollo_params.append(param)
-
-    apollo_kwargs = {
-        "rank": finetuning_args.apollo_rank,
-        "proj": finetuning_args.apollo_proj,
-        "proj_type": finetuning_args.apollo_proj_type,
-        "update_proj_gap": finetuning_args.apollo_update_interval,
-        "scale": finetuning_args.apollo_scale,
-        "scale_type": finetuning_args.apollo_scale_type,
-        "scale_front": finetuning_args.apollo_scale_front,
-    }
-
-    id_apollo_params = {id(param) for param in apollo_params}
-    decay_params, nodecay_params = [], []  # they are non-apollo parameters
-    trainable_params: list[torch.nn.Parameter] = []  # apollo_params + decay_params + nodecay_params
-    decay_param_names = _get_decay_parameter_names(model)
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            trainable_params.append(param)
-            if id(param) not in id_apollo_params:
-                if name in decay_param_names:
-                    decay_params.append(param)
-                else:
-                    nodecay_params.append(param)
-
-    _, optim_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args)
-
-    if training_args.optim == "adamw_torch":
-        optim_class = APOLLOAdamW
-    else:
-        raise NotImplementedError(f"Unknown optim: {training_args.optim}.")
-
-    if finetuning_args.apollo_layerwise:
-        logger.warning_rank0("The displayed gradient norm will be all zeros in layerwise APOLLO.")
-        if training_args.gradient_accumulation_steps != 1:
-            raise ValueError("Per-layer APOLLO does not support gradient accumulation.")
-
-        optimizer_dict: dict[torch.Tensor, torch.optim.Optimizer] = {}
-        for param in nodecay_params:
-            param_groups = [dict(params=[param], weight_decay=0.0)]
-            optimizer_dict[param] = optim_class(param_groups, **optim_kwargs)
-        for param in decay_params:
-            param_groups = [dict(params=[param], weight_decay=training_args.weight_decay)]
-            optimizer_dict[param] = optim_class(param_groups, **optim_kwargs)
-        for param in apollo_params:  # apollo params have weight decay
-            param_groups = [dict(params=[param], weight_decay=training_args.weight_decay, **apollo_kwargs)]
-            optimizer_dict[param] = optim_class(param_groups, **optim_kwargs)
-
-        def optimizer_hook(param: "torch.nn.Parameter"):
-            if param.grad is not None:
-                optimizer_dict[param].step()
-                optimizer_dict[param].zero_grad()
-
-        for param in trainable_params:
-            param.register_post_accumulate_grad_hook(optimizer_hook)
-
-        optimizer = DummyOptimizer(lr=training_args.learning_rate, optimizer_dict=optimizer_dict)
-    else:
-        param_groups = [
-            dict(params=nodecay_params, weight_decay=0.0),
-            dict(params=decay_params, weight_decay=training_args.weight_decay),
-            dict(params=apollo_params, weight_decay=training_args.weight_decay, **apollo_kwargs),
-        ]
-        optimizer = optim_class(param_groups, **optim_kwargs)
-
-    logger.info_rank0(f"Using APOLLO optimizer with args: {apollo_kwargs}.")
-    return optimizer
-
-
-def _create_loraplus_optimizer(
-    model: "PreTrainedModel",
-    training_args: "TrainingArguments",
-    finetuning_args: "FinetuningArguments",
-) -> "torch.optim.Optimizer":
-    default_lr = training_args.learning_rate
-    loraplus_lr = training_args.learning_rate * finetuning_args.loraplus_lr_ratio
-    embedding_lr = finetuning_args.loraplus_lr_embedding
-
-    decay_param_names = _get_decay_parameter_names(model)
-    param_dict: dict[str, list[torch.nn.Parameter]] = {
-        "lora_a": [],
-        "lora_b": [],
-        "lora_b_nodecay": [],
-        "embedding": [],
-    }
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            if "lora_embedding_B" in name:
-                param_dict["embedding"].append(param)
-            elif "lora_B" in name or param.ndim == 1:
-                if name in decay_param_names:
-                    param_dict["lora_b"].append(param)
-                else:
-                    param_dict["lora_b_nodecay"].append(param)
-            else:
-                param_dict["lora_a"].append(param)
-
-    optim_class, optim_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args)
-    param_groups = [
-        dict(params=param_dict["lora_a"], lr=default_lr, weight_decay=training_args.weight_decay),
-        dict(params=param_dict["lora_b"], lr=loraplus_lr, weight_decay=training_args.weight_decay),
-        dict(params=param_dict["lora_b_nodecay"], lr=loraplus_lr, weight_decay=0.0),
-        dict(params=param_dict["embedding"], lr=embedding_lr, weight_decay=training_args.weight_decay),
-    ]
-    optimizer = optim_class(param_groups, **optim_kwargs)
-    logger.info_rank0(f"Using LoRA+ optimizer with loraplus lr ratio {finetuning_args.loraplus_lr_ratio:.2f}.")
-    return optimizer
-
-
-def _create_badam_optimizer(
-    model: "PreTrainedModel",
-    training_args: "TrainingArguments",
-    finetuning_args: "FinetuningArguments",
-) -> "torch.optim.Optimizer":
-    decay_params, nodecay_params = [], []
-    decay_param_names = _get_decay_parameter_names(model)
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            if name in decay_param_names:
-                decay_params.append(param)
-            else:
-                nodecay_params.append(param)
-
-    optim_class, optim_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args)
-    param_groups = [
-        dict(params=nodecay_params, weight_decay=0.0),
-        dict(params=decay_params, weight_decay=training_args.weight_decay),
-    ]
-
-    if finetuning_args.badam_mode == "layer":
-        from badam import BlockOptimizer  # type: ignore
-
-        base_optimizer = optim_class(param_groups, **optim_kwargs)
-        optimizer = BlockOptimizer(
-            base_optimizer=base_optimizer,
-            named_parameters_list=list(model.named_parameters()),
-            block_prefix_list=None,
-            switch_block_every=finetuning_args.badam_switch_interval,
-            start_block=finetuning_args.badam_start_block,
-            switch_mode=finetuning_args.badam_switch_mode,
-            verbose=finetuning_args.badam_verbose,
-            ds_zero3_enabled=is_deepspeed_zero3_enabled(),
-        )
-        logger.info_rank0(
-            f"Using BAdam optimizer with layer-wise update, switch mode is {finetuning_args.badam_switch_mode}, "
-            f"switch block every {finetuning_args.badam_switch_interval} steps, "
-            f"default start block is {finetuning_args.badam_start_block}"
-        )
-
-    elif finetuning_args.badam_mode == "ratio":
-        from badam import BlockOptimizerRatio  # type: ignore
-
-        assert finetuning_args.badam_update_ratio > 1e-6
-        optimizer = BlockOptimizerRatio(
-            param_groups=param_groups,
-            named_parameters_list=list(model.named_parameters()),
-            update_ratio=finetuning_args.badam_update_ratio,
-            mask_mode=finetuning_args.badam_mask_mode,
-            verbose=finetuning_args.badam_verbose,
-            include_embedding=False,
-            **optim_kwargs,
-        )
-        logger.info_rank0(
-            f"Using BAdam optimizer with ratio-based update, update ratio is {finetuning_args.badam_update_ratio}, "
-            f"mask mode is {finetuning_args.badam_mask_mode}"
-        )
-
-    return optimizer
-
-
-def _create_adam_mini_optimizer(
-    model: "PreTrainedModel",
-    training_args: "TrainingArguments",
-) -> "torch.optim.Optimizer":
-    from adam_mini import Adam_mini  # type: ignore
-
-    hidden_size = getattr(model.config, "hidden_size", None)
-    num_q_head = getattr(model.config, "num_attention_heads", None)
-    num_kv_head = getattr(model.config, "num_key_value_heads", None)
-
-    optimizer = Adam_mini(
-        named_parameters=model.named_parameters(),
-        lr=training_args.learning_rate,
-        betas=(training_args.adam_beta1, training_args.adam_beta2),
-        eps=training_args.adam_epsilon,
-        weight_decay=training_args.weight_decay,
-        model_sharding=is_fsdp_enabled() or is_deepspeed_zero3_enabled(),
-        dim=hidden_size,
-        n_heads=num_q_head,
-        n_kv_heads=num_kv_head,
-    )
-    logger.info_rank0("Using Adam-mini optimizer.")
-    return optimizer
-
-
-def _create_muon_optimizer(
-    model: "PreTrainedModel",
-    training_args: "TrainingArguments",
-) -> "torch.optim.Optimizer":
-    from ..third_party.muon import Muon
-
-    muon_params, adamw_params = [], []
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            # Use Muon for 2D parameters that aren't embeddings or heads
-            if param.ndim == 2 and "embed" not in name and "lm_head" not in name:
-                muon_params.append(param)
-            else:
-                adamw_params.append(param)
-
-    optimizer = Muon(
-        lr=training_args.learning_rate,
-        wd=training_args.weight_decay,
-        muon_params=muon_params,
-        adamw_params=adamw_params,
-        adamw_betas=(training_args.adam_beta1, training_args.adam_beta2),
-        adamw_eps=training_args.adam_epsilon,
-    )
-    logger.info_rank0(
-        f"Using Muon optimizer with {len(muon_params)} Muon params and {len(adamw_params)} AdamW params."
-    )
-    return optimizer
-
-
 def create_custom_optimizer(
     model: "PreTrainedModel",
     training_args: "TrainingArguments",
     finetuning_args: "FinetuningArguments",
 ) -> Optional["torch.optim.Optimizer"]:
-    if finetuning_args.use_galore:
-        return _create_galore_optimizer(model, training_args, finetuning_args)
-
-    if finetuning_args.use_apollo:
-        return _create_apollo_optimizer(model, training_args, finetuning_args)
-
-    if finetuning_args.loraplus_lr_ratio is not None:
-        return _create_loraplus_optimizer(model, training_args, finetuning_args)
-
-    if finetuning_args.use_badam:
-        return _create_badam_optimizer(model, training_args, finetuning_args)
-
-    if finetuning_args.use_adam_mini:
-        return _create_adam_mini_optimizer(model, training_args)
-
-    if finetuning_args.use_muon:
-        return _create_muon_optimizer(model, training_args)
-
+    return None
 
 def create_custom_scheduler(
     training_args: "TrainingArguments",
@@ -587,7 +219,6 @@ def create_custom_scheduler(
 
         for param in optimizer_dict.keys():
             param.register_post_accumulate_grad_hook(scheduler_hook)
-
 
 def get_batch_logps(
     logits: "torch.Tensor",
@@ -635,7 +266,6 @@ def get_batch_logps(
 
     return logps, valid_length
 
-
 def dft_loss_func(
     outputs: "torch.Tensor", labels: "torch.Tensor", num_items_in_batch: Optional["torch.Tensor"] = None
 ):
@@ -653,7 +283,6 @@ def dft_loss_func(
 
     loss = _dft_cross_entropy(logits, shift_labels, num_items_in_batch)
     return loss
-
 
 def _dft_cross_entropy(
     source: "torch.Tensor",
@@ -681,7 +310,6 @@ def _dft_cross_entropy(
     else:
         loss = weighted_losses.mean()
     return loss
-
 
 def asft_loss_func(
     outputs,
@@ -716,7 +344,6 @@ def asft_loss_func(
         ignore_index=ignore_index,
     )
 
-
 def _asft_cross_entropy(
     policy_logits: torch.Tensor,
     policy_labels: torch.Tensor,
@@ -738,7 +365,6 @@ def _asft_cross_entropy(
     )
 
     return dft_loss + asft_alpha * kl_loss
-
 
 def _kl_divergence(
     policy_logits: torch.Tensor,
@@ -764,7 +390,6 @@ def _kl_divergence(
 
     return (kl * mask).sum() / mask.sum()
 
-
 def eaft_loss_func(
     outputs: "torch.Tensor",
     labels: "torch.Tensor",
@@ -785,7 +410,6 @@ def eaft_loss_func(
 
     loss = _eaft_cross_entropy(logits, shift_labels, num_items_in_batch, alpha)
     return loss
-
 
 def _eaft_cross_entropy(
     source: "torch.Tensor",
@@ -825,7 +449,6 @@ def _eaft_cross_entropy(
 
     return loss
 
-
 def nested_detach(
     tensors: Union["torch.Tensor", list["torch.Tensor"], tuple["torch.Tensor"], dict[str, "torch.Tensor"]],
     clone: bool = False,
@@ -843,111 +466,6 @@ def nested_detach(
             return tensors.detach()
     else:
         return tensors
-
-
-def get_swanlab_callback(finetuning_args: "FinetuningArguments") -> "TrainerCallback":
-    r"""Get the callback for logging to SwanLab."""
-    import swanlab  # type: ignore
-    from swanlab.integration.transformers import SwanLabCallback  # type: ignore
-
-    if finetuning_args.swanlab_api_key is not None:
-        swanlab.login(api_key=finetuning_args.swanlab_api_key)
-
-    if finetuning_args.swanlab_lark_webhook_url is not None:
-        from swanlab.plugin.notification import LarkCallback  # type: ignore
-
-        lark_callback = LarkCallback(
-            webhook_url=finetuning_args.swanlab_lark_webhook_url,
-            secret=finetuning_args.swanlab_lark_secret,
-        )
-        swanlab.register_callbacks([lark_callback])
-
-    class SwanLabCallbackExtension(SwanLabCallback):
-        def setup(self, args: "TrainingArguments", state: "TrainerState", model: "PreTrainedModel", **kwargs):
-            if not state.is_world_process_zero:
-                return
-
-            super().setup(args, state, model, **kwargs)
-            try:
-                if hasattr(self, "_swanlab"):
-                    swanlab_public_config = self._swanlab.get_run().public.json()
-                else:  # swanlab <= 0.4.9
-                    swanlab_public_config = self._experiment.get_run().public.json()
-            except Exception:
-                swanlab_public_config = {}
-
-            with open(os.path.join(args.output_dir, SWANLAB_CONFIG), "w") as f:
-                f.write(json.dumps(swanlab_public_config, indent=2))
-
-    swanlab_callback = SwanLabCallbackExtension(
-        project=finetuning_args.swanlab_project,
-        workspace=finetuning_args.swanlab_workspace,
-        experiment_name=finetuning_args.swanlab_run_name,
-        mode=finetuning_args.swanlab_mode,
-        config={"Framework": "🦙LlamaFactory"},
-        logdir=finetuning_args.swanlab_logdir,
-        tags=["🦙LlamaFactory"],
-    )
-    return swanlab_callback
-
-
-def get_placement_group(num_workers: int) -> tuple["PlacementGroup", dict[str, int]]:
-    r"""Get the Ray placement group for distributed training."""
-    bundle = {"CPU": 10}
-    device_name = get_device_name().upper()
-    if device_name != "CPU":
-        bundle[device_name] = 1
-    bundles = [bundle for _ in range(num_workers)]
-    pg = placement_group(bundles, strategy="PACK")
-
-    return pg, bundle
-
-
-def get_ray_remote_config_for_worker(
-    placement_group: "PlacementGroup",
-    bundle_idx: int,
-    rank: int,
-    world_size: int,
-    master_addr: str,
-    master_port: str,
-    env: dict[str, str] = None,
-) -> dict[str, Any]:
-    r"""Get the remote config for a Ray worker."""
-    env_vars = {
-        "RANK": str(rank),
-        "WORLD_SIZE": str(world_size),
-        "MASTER_ADDR": master_addr,
-        "MASTER_PORT": master_port,
-        "TORCHELASTIC_USE_AGENT_STORE": "False",
-    }
-    env.update(env_vars)
-
-    remote_config = {
-        "scheduling_strategy": PlacementGroupSchedulingStrategy(
-            placement_group=placement_group,
-            placement_group_bundle_index=bundle_idx,
-        ),
-        "runtime_env": {"env_vars": env},
-        "num_cpus": 10,
-    }
-
-    device_name = get_device_name()
-    if device_name == "gpu":
-        remote_config["num_gpus"] = 1
-    elif device_name == "npu":
-        remote_config["resources"] = {"NPU": 1}
-
-    return remote_config
-
-
-def get_ray_head_node_ip() -> str:
-    r"""Get the IP address of the Ray head node."""
-    head_ip = next(node["node_ip"] for node in list_nodes() if node.get("is_head_node", False))
-    return head_ip
-
-
-def sort_placement_group_by_node_ip(placement_group: "PlacementGroup", master_addr: str = None) -> list[int]:
-    r"""Sort the placement group bundles by their node IP addresses."""
 
     @ray.remote
     def _get_node_ip():

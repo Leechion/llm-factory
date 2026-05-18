@@ -14,12 +14,7 @@
 
 
 def main():
-    from .extras.misc import is_env_enabled
-
-    if is_env_enabled("USE_V1"):
-        from .v1 import launcher
-    else:
-        from . import launcher
+    from . import launcher
 
     launcher.launch()
 

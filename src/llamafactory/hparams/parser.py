@@ -33,13 +33,12 @@ from transformers.utils import is_torch_bf16_gpu_available, is_torch_npu_availab
 from ..extras import logging
 from ..extras.constants import CHECKPOINT_NAMES, EngineName
 from ..extras.misc import check_dependencies, check_version, get_current_device, is_env_enabled
-from ..extras.packages import is_mcore_adapter_available
 from .data_args import DataArguments
 from .evaluation_args import EvaluationArguments
 from .finetuning_args import FinetuningArguments
 from .generating_args import GeneratingArguments
 from .model_args import ModelArguments
-from .training_args import RayArguments, TrainingArguments
+from .training_args import TrainingArguments
 
 
 logger = logging.get_logger(__name__)
@@ -53,17 +52,6 @@ _INFER_ARGS = [ModelArguments, DataArguments, FinetuningArguments, GeneratingArg
 _INFER_CLS = tuple[ModelArguments, DataArguments, FinetuningArguments, GeneratingArguments]
 _EVAL_ARGS = [ModelArguments, DataArguments, EvaluationArguments, FinetuningArguments]
 _EVAL_CLS = tuple[ModelArguments, DataArguments, EvaluationArguments, FinetuningArguments]
-
-if is_mcore_adapter_available() and is_env_enabled("USE_MCA"):
-    from mcore_adapter import TrainingArguments as McaTrainingArguments
-
-    _TRAIN_MCA_ARGS = [ModelArguments, DataArguments, McaTrainingArguments, FinetuningArguments, GeneratingArguments]
-    _TRAIN_MCA_CLS = tuple[
-        ModelArguments, DataArguments, McaTrainingArguments, FinetuningArguments, GeneratingArguments
-    ]
-else:
-    _TRAIN_MCA_ARGS = []
-    _TRAIN_MCA_CLS = tuple()
 
 
 def read_args(args: dict[str, Any] | list[str] | None = None) -> dict[str, Any] | list[str]:
@@ -205,28 +193,6 @@ def _check_extra_dependencies(
     if model_args.mixture_of_depths is not None:
         check_version("mixture-of-depth>=1.1.6", mandatory=True)
 
-    if model_args.infer_backend == EngineName.VLLM:
-        check_version("vllm>=0.4.3,<=0.11.0")
-        check_version("vllm", mandatory=True)
-    elif model_args.infer_backend == EngineName.SGLANG:
-        check_version("sglang>=0.4.5")
-        check_version("sglang", mandatory=True)
-
-    if finetuning_args.use_galore:
-        check_version("galore_torch", mandatory=True)
-
-    if finetuning_args.use_apollo:
-        check_version("apollo_torch", mandatory=True)
-
-    if finetuning_args.use_badam:
-        check_version("badam>=1.2.1", mandatory=True)
-
-    if finetuning_args.use_adam_mini:
-        check_version("adam-mini", mandatory=True)
-
-    if finetuning_args.use_swanlab:
-        check_version("swanlab", mandatory=True)
-
     if finetuning_args.plot_loss:
         check_version("matplotlib", mandatory=True)
 
@@ -246,27 +212,6 @@ def _parse_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_
     return _parse_args(parser, args, allow_extra_keys=allow_extra_keys)
 
 
-def _parse_train_mca_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_MCA_CLS:
-    parser = HfArgumentParser(_TRAIN_MCA_ARGS)
-    allow_extra_keys = is_env_enabled("ALLOW_EXTRA_ARGS")
-    model_args, data_args, training_args, finetuning_args, generating_args = _parse_args(
-        parser, args, allow_extra_keys=allow_extra_keys
-    )
-
-    _configure_mca_training_args(training_args, data_args, finetuning_args)
-
-    return model_args, data_args, training_args, finetuning_args, generating_args
-
-
-def _configure_mca_training_args(training_args, data_args, finetuning_args) -> None:
-    """Patch training args to avoid args checking errors and sync MCA settings."""
-    training_args.predict_with_generate = False
-    training_args.generation_max_length = data_args.cutoff_len
-    training_args.generation_num_beams = 1
-    training_args.use_mca = True
-    finetuning_args.use_mca = True
-
-
 def _parse_infer_args(args: dict[str, Any] | list[str] | None = None) -> _INFER_CLS:
     parser = HfArgumentParser(_INFER_ARGS)
     allow_extra_keys = is_env_enabled("ALLOW_EXTRA_ARGS")
@@ -279,18 +224,8 @@ def _parse_eval_args(args: dict[str, Any] | list[str] | None = None) -> _EVAL_CL
     return _parse_args(parser, args, allow_extra_keys=allow_extra_keys)
 
 
-def get_ray_args(args: dict[str, Any] | list[str] | None = None) -> RayArguments:
-    parser = HfArgumentParser(RayArguments)
-    (ray_args,) = _parse_args(parser, args, allow_extra_keys=True)
-    return ray_args
-
-
 def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS:
-    if is_env_enabled("USE_MCA"):
-        model_args, data_args, training_args, finetuning_args, generating_args = _parse_train_mca_args(args)
-    else:
-        model_args, data_args, training_args, finetuning_args, generating_args = _parse_train_args(args)
-        finetuning_args.use_mca = False
+    model_args, data_args, training_args, finetuning_args, generating_args = _parse_train_args(args)
 
     # Setup logging
     if training_args.should_log:
@@ -309,27 +244,6 @@ def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS
 
     if finetuning_args.stage == "sft" and training_args.do_predict and not training_args.predict_with_generate:
         raise ValueError("Please enable `predict_with_generate` to save model predictions.")
-
-    if finetuning_args.stage in ["rm", "ppo"] and training_args.load_best_model_at_end:
-        raise ValueError("RM and PPO stages do not support `load_best_model_at_end`.")
-
-    if finetuning_args.stage == "ppo":
-        if not training_args.do_train:
-            raise ValueError("PPO training does not support evaluation, use the SFT stage to evaluate models.")
-
-        if model_args.shift_attn:
-            raise ValueError("PPO training is incompatible with S^2-Attn.")
-
-        if finetuning_args.reward_model_type == "lora" and model_args.use_kt:
-            raise ValueError("KTransformers does not support lora reward model.")
-
-        if finetuning_args.reward_model_type == "lora" and model_args.use_unsloth:
-            raise ValueError("Unsloth does not support lora reward model.")
-
-        if training_args.report_to and any(
-            logger not in ("wandb", "tensorboard", "trackio", "none") for logger in training_args.report_to
-        ):
-            raise ValueError("PPO only accepts wandb, tensorboard, or trackio logger.")
 
     if not model_args.use_kt and training_args.parallel_mode == ParallelMode.NOT_DISTRIBUTED:
         raise ValueError("Please launch distributed training with `llamafactory-cli` or `torchrun`.")
@@ -368,28 +282,6 @@ def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS
         if is_deepspeed_zero3_enabled():
             raise ValueError("`pure_bf16` is incompatible with DeepSpeed ZeRO-3.")
 
-    if training_args.parallel_mode == ParallelMode.DISTRIBUTED:
-        if finetuning_args.use_galore and finetuning_args.galore_layerwise:
-            raise ValueError("Distributed training does not support layer-wise GaLore.")
-
-        if finetuning_args.use_apollo and finetuning_args.apollo_layerwise:
-            raise ValueError("Distributed training does not support layer-wise APOLLO.")
-
-        if finetuning_args.use_badam:
-            if finetuning_args.badam_mode == "ratio":
-                raise ValueError("Radio-based BAdam does not yet support distributed training, use layer-wise BAdam.")
-            elif not is_deepspeed_zero3_enabled():
-                raise ValueError("Layer-wise BAdam only supports DeepSpeed ZeRO-3 training.")
-
-    if training_args.deepspeed is not None and (finetuning_args.use_galore or finetuning_args.use_apollo):
-        raise ValueError("GaLore and APOLLO are incompatible with DeepSpeed yet.")
-
-    if not finetuning_args.use_mca and training_args.fp8 and model_args.quantization_bit is not None:
-        raise ValueError("FP8 training is not compatible with quantization. Please disable one of them.")
-
-    if model_args.infer_backend != EngineName.HF:
-        raise ValueError("vLLM/SGLang backend is only available for API, CLI and Web.")
-
     if model_args.use_unsloth and is_deepspeed_zero3_enabled():
         raise ValueError("Unsloth is incompatible with DeepSpeed ZeRO-3.")
 
@@ -400,10 +292,6 @@ def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS
     _verify_model_args(model_args, data_args, finetuning_args)
     _check_extra_dependencies(model_args, finetuning_args, training_args)
     _verify_trackio_args(training_args)
-
-    if not finetuning_args.use_mca and training_args.fp8_enable_fsdp_float8_all_gather and not training_args.fp8:
-        logger.warning_rank0("fp8_enable_fsdp_float8_all_gather requires fp8=True. Setting fp8=True.")
-        model_args.fp8 = True
 
     if (
         training_args.do_train
@@ -422,15 +310,6 @@ def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS
     if training_args.do_train and (not training_args.fp16) and (not training_args.bf16):
         logger.warning_rank0("We recommend enable mixed precision training.")
 
-    if (
-        training_args.do_train
-        and (finetuning_args.use_galore or finetuning_args.use_apollo)
-        and not finetuning_args.pure_bf16
-    ):
-        logger.warning_rank0(
-            "Using GaLore or APOLLO with mixed precision training may significantly increases GPU memory usage."
-        )
-
     if (not training_args.do_train) and model_args.quantization_bit is not None:
         logger.warning_rank0("Evaluating model in 4/8-bit mode may cause lower scores.")
 
@@ -446,9 +325,6 @@ def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS
         # https://github.com/huggingface/transformers/blob/v4.50.0/src/transformers/trainer.py#L782
         training_args.label_names = training_args.label_names or ["labels"]
 
-    if "swanlab" in training_args.report_to and finetuning_args.use_swanlab:
-        training_args.report_to.remove("swanlab")
-
     if (
         training_args.parallel_mode == ParallelMode.DISTRIBUTED
         and training_args.ddp_find_unused_parameters is None
@@ -457,20 +333,11 @@ def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS
         logger.info_rank0("Set `ddp_find_unused_parameters` to False in DDP training since LoRA is enabled.")
         training_args.ddp_find_unused_parameters = False
 
-    if finetuning_args.stage in ["rm", "ppo"] and finetuning_args.finetuning_type in ["full", "freeze"]:
-        can_resume_from_checkpoint = False
-        if training_args.resume_from_checkpoint is not None:
-            logger.warning_rank0("Cannot resume from checkpoint in current stage.")
-            training_args.resume_from_checkpoint = None
-    else:
-        can_resume_from_checkpoint = True
-
     if (
         training_args.resume_from_checkpoint is None
         and training_args.do_train
         and os.path.isdir(training_args.output_dir)
-        and not getattr(training_args, "overwrite_output_dir", False)  # for mca training args and transformers >= 5.0
-        and can_resume_from_checkpoint
+        and not getattr(training_args, "overwrite_output_dir", False)
     ):
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
         if last_checkpoint is None and any(
@@ -483,15 +350,6 @@ def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS
             logger.info_rank0(f"Resuming training from {training_args.resume_from_checkpoint}.")
             logger.info_rank0("Change `output_dir` or use `overwrite_output_dir` to avoid.")
 
-    if (
-        finetuning_args.stage in ["rm", "ppo"]
-        and finetuning_args.finetuning_type == "lora"
-        and training_args.resume_from_checkpoint is not None
-    ):
-        logger.warning_rank0(
-            f"Add {training_args.resume_from_checkpoint} to `adapter_name_or_path` to resume training from checkpoint."
-        )
-
     # Post-process model arguments
     if training_args.bf16 or finetuning_args.pure_bf16:
         model_args.compute_dtype = torch.bfloat16
@@ -501,7 +359,7 @@ def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS
     model_args.device_map = {"": get_current_device()}
     model_args.model_max_length = data_args.cutoff_len
     model_args.block_diag_attn = data_args.neat_packing
-    data_args.packing = data_args.packing if data_args.packing is not None else finetuning_args.stage == "pt"
+    data_args.packing = data_args.packing if data_args.packing is not None else False
 
     # Log on each process the small summary
     logger.info(
@@ -523,20 +381,6 @@ def get_infer_args(args: dict[str, Any] | list[str] | None = None) -> _INFER_CLS
 
     # Setup logging
     _set_transformers_logging()
-
-    # Check arguments
-    if model_args.infer_backend == "vllm":
-        if finetuning_args.stage != "sft":
-            raise ValueError("vLLM engine only supports auto-regressive models.")
-
-        if model_args.quantization_bit is not None:
-            raise ValueError("vLLM engine does not support bnb quantization (GPTQ and AWQ are supported).")
-
-        if model_args.rope_scaling is not None:
-            raise ValueError("vLLM engine does not support RoPE scaling.")
-
-        if model_args.adapter_name_or_path is not None and len(model_args.adapter_name_or_path) != 1:
-            raise ValueError("vLLM only accepts a single adapter. Merge them first.")
 
     _set_env_vars()
     _verify_model_args(model_args, data_args, finetuning_args)

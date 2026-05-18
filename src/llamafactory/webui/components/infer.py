@@ -34,9 +34,9 @@ def create_infer_tab(engine: "Engine") -> dict[str, "Component"]:
     elem_dict = dict()
 
     with gr.Row():
-        infer_backend = gr.Dropdown(choices=["huggingface", "vllm", "sglang"], value="huggingface")
+        infer_backend = gr.Dropdown(choices=["huggingface"], value="huggingface")
         infer_dtype = gr.Dropdown(choices=["auto", "float16", "bfloat16", "float32"], value="auto")
-        extra_args = gr.Textbox(value='{"vllm_enforce_eager": true}')
+        extra_args = gr.Textbox(value="{}")
 
     with gr.Row():
         load_btn = gr.Button()

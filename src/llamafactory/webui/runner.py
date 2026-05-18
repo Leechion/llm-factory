@@ -40,16 +40,13 @@ from .common import (
 from .control import get_trainer_info
 from .locales import ALERTS, LOCALES
 
-
 if is_gradio_available():
     import gradio as gr
-
 
 if TYPE_CHECKING:
     from gradio.components import Component
 
     from .manager import Manager
-
 
 class Runner:
     r"""A class to manage the running status of the trainers."""
@@ -163,10 +160,7 @@ class Runner:
             use_llama_pro=get("train.use_llama_pro"),
             enable_thinking=get("train.enable_thinking"),
             report_to=get("train.report_to"),
-            use_galore=get("train.use_galore"),
-            use_apollo=get("train.use_apollo"),
-            use_badam=get("train.use_badam"),
-            use_swanlab=get("train.use_swanlab"),
+
             output_dir=get_save_dir(model_name, finetuning_type, get("train.output_dir")),
             fp16=(get("train.compute_type") == "fp16"),
             bf16=(get("train.compute_type") == "bf16"),
@@ -245,32 +239,6 @@ class Runner:
             args["video_max_pixels"] = calculate_pixels(get("train.video_max_pixels"))
             args["video_min_pixels"] = calculate_pixels(get("train.video_min_pixels"))
 
-        # galore config
-        if args["use_galore"]:
-            args["galore_rank"] = get("train.galore_rank")
-            args["galore_update_interval"] = get("train.galore_update_interval")
-            args["galore_scale"] = get("train.galore_scale")
-            args["galore_target"] = get("train.galore_target")
-
-        # apollo config
-        if args["use_apollo"]:
-            args["apollo_rank"] = get("train.apollo_rank")
-            args["apollo_update_interval"] = get("train.apollo_update_interval")
-            args["apollo_scale"] = get("train.apollo_scale")
-            args["apollo_target"] = get("train.apollo_target")
-
-        # badam config
-        if args["use_badam"]:
-            args["badam_mode"] = get("train.badam_mode")
-            args["badam_switch_mode"] = get("train.badam_switch_mode")
-            args["badam_switch_interval"] = get("train.badam_switch_interval")
-            args["badam_update_ratio"] = get("train.badam_update_ratio")
-
-        # swanlab config
-        if get("train.use_swanlab"):
-            args["swanlab_project"] = get("train.swanlab_project")
-            args["swanlab_run_name"] = get("train.swanlab_run_name")
-            args["swanlab_workspace"] = get("train.swanlab_workspace")
             args["swanlab_api_key"] = get("train.swanlab_api_key")
             args["swanlab_mode"] = get("train.swanlab_mode")
 

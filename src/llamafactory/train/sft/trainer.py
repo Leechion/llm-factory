@@ -29,7 +29,6 @@ from typing_extensions import override
 from ...extras import logging
 from ...extras.constants import IGNORE_INDEX
 from ..callbacks import SaveProcessorCallback
-from ..fp8_utils import configure_fp8_environment, patch_accelerator_for_fp8, verify_fp8_status
 from ..trainer_utils import create_custom_optimizer, create_custom_scheduler
 
 
@@ -57,12 +56,6 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         **kwargs,
     ) -> None:
         kwargs["processing_class"] = kwargs.pop("tokenizer")
-        # Configure FP8 environment if enabled
-        training_args: TrainingArguments = kwargs.get("args")
-        if training_args.fp8:
-            configure_fp8_environment(training_args)
-            if getattr(training_args, "fp8_backend", "auto") == "te":
-                patch_accelerator_for_fp8()
 
         super().__init__(**kwargs)
         if processor is not None:
@@ -78,10 +71,8 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         if processor is not None:
             self.add_callback(SaveProcessorCallback(processor))
 
-        if finetuning_args.use_badam:
-            from badam import BAdamCallback, clip_grad_norm_old_version  # type: ignore
-
-            self.accelerator.clip_grad_norm_ = MethodType(clip_grad_norm_old_version, self.accelerator)
+        if False:  # badam removed in simplified version
+            pass
             self.add_callback(BAdamCallback)
 
         self.ref_model = ref_model
@@ -123,9 +114,6 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
                 asft_loss_func,
                 asft_alpha=finetuning_args.asft_alpha,
             )
-
-        if training_args.fp8 and hasattr(self, "accelerator"):  # verify FP8 status after trainer initialization
-            verify_fp8_status(self.accelerator, training_args)
 
     @override
     def create_optimizer(self) -> "torch.optim.Optimizer":
